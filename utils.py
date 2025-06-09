@@ -9,35 +9,59 @@ from tkinter import filedialog, messagebox
 
 from PyQt5.QtWidgets import QApplication, QFileDialog, QListView, QTreeView, QAbstractItemView
 import sys
+from PyQt5.QtWidgets import QApplication, QFileDialog
 
 def select_folders():
-    """
-    Open a PyQt5 dialog to select one or more folders (including drives like C:/).
-    """
     app = QApplication(sys.argv)
     dialog = QFileDialog()
     dialog.setFileMode(QFileDialog.Directory)
     dialog.setOption(QFileDialog.ShowDirsOnly, True)
-    dialog.setOption(QFileDialog.DontUseNativeDialog, True)
-    dialog.setDirectory("C:/")  # Default to root drive
+    dialog.setOption(QFileDialog.DontUseNativeDialog, False)
     dialog.setWindowTitle("Select one or more folders or drives")
-    dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, False)
+    dialog.setOption(QFileDialog.Option.DontResolveSymlinks, True)
 
-    # Hack to enable multi-folder selection
-    list_view = dialog.findChild(QListView, "listView")
-    tree_view = dialog.findChild(QTreeView)
-    if list_view:
-        list_view.setSelectionMode(QAbstractItemView.MultiSelection)
-    if tree_view:
-        tree_view.setSelectionMode(QAbstractItemView.MultiSelection)
+    dialog.setFileMode(QFileDialog.Directory)
+    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, False)
+    dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    dialog.setOption(QFileDialog.Option.DontUseCustomDirectoryIcons, True)
 
-    if dialog.exec_():
-        folders = dialog.selectedFiles()
-        print("Selected folders:", folders)
-        return folders
-    else:
-        print("No folders selected.")
-        sys.exit(1)
+    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, False)
+    dialog.setFileMode(QFileDialog.Directory)
+    dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+
+    # Allow multiple folder selection
+    dialog.setFileMode(QFileDialog.Directory)
+    dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, False)
+
+    dialog.setOption(QFileDialog.Option.ReadOnly, True)
+    dialog.setFileMode(QFileDialog.Directory)
+    dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, False)
+    dialog.setFileMode(QFileDialog.Directory)
+    dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, False)
+
+    # Use getExistingDirectory for single folder or getExistingDirectories (not built-in)
+    # For multiple selection, use getOpenFileNames with options to only select folders:
+    #folders = QFileDialog.getExistingDirectory(None, "Select Folder",
+    #                                          options=QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks)
+
+    # Note: PyQt5 QFileDialog does NOT support native multiple folder selection easily.
+    # Alternative: Use QFileDialog.getOpenFileNames with filter or a custom dialog if you want multi-select folders.
+
+    # So here is a workaround to select multiple folders via repeated dialog (basic)
+    selected_folders = []
+    while True:
+        folder = QFileDialog.getExistingDirectory(None, "Select Folder (Cancel to finish)",
+                                                  options=QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks)
+        if folder:
+            selected_folders.append(folder)
+        else:
+            break
+
+    return selected_folders
 
 
 def load_known_people(known_folder):
