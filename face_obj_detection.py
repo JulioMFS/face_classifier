@@ -1,224 +1,103 @@
 import os
-import cv2
 import json
 import yaml
-import tkinter as tk
-from tkinter import filedialog
-import face_recognition
-from ultralytics import YOLO
-from PIL import Image, ExifTags
-from datetime import datetime
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import cv2
+import numpy as np
 from tqdm import tqdm
-import traceback
+from collections import Counter
+from multiprocessing import Pool, cpu_count, Manager
+from ultralytics import YOLO
+from utils import select_folders, load_known_people, process_file, extract_metadata  # assumed available
 
 def load_config(config_path):
     with open(config_path, 'r') as f:
         return yaml.safe_load(f)
 
-def load_known_people(folder):
-    known_encodings = []
-    known_names = []
-    for file in os.listdir(folder):
-        path = os.path.join(folder, file)
-        if file.lower().endswith(('.jpg', '.jpeg', '.png')):
-            image = face_recognition.load_image_file(path)
-            encodings = face_recognition.face_encodings(image)
-            if encodings:
-                known_encodings.append(encodings[0])
-                known_names.append(os.path.splitext(file)[0])
-    return known_encodings, known_names
+def load_checkpoint(checkpoint_path):
+    if os.path.exists(checkpoint_path):
+        with open(checkpoint_path, 'r') as f:
+            return set(json.load(f))
+    return set()
 
-def extract_image_metadata(image_path):
-    metadata = {}
-    try:
-        img = Image.open(image_path)
-        exif = {
-            ExifTags.TAGS.get(k, k): v
-            for k, v in img._getexif().items()
-        } if img._getexif() else {}
-        # GPS
-        gps_info = exif.get("GPSInfo")
-        if gps_info:
-            def convert_to_degrees(value):
-                d, m, s = value
-                return d[0] / d[1] + (m[0] / m[1]) / 60 + (s[0] / s[1]) / 3600
-            lat = convert_to_degrees(gps_info[2]) * (-1 if gps_info[3] == 'S' else 1)
-            lon = convert_to_degrees(gps_info[4]) * (-1 if gps_info[5] == 'W' else 1)
-            metadata['gps'] = {'lat': lat, 'lon': lon}
-        # Timestamp
-        timestamp = exif.get("DateTimeOriginal") or exif.get("DateTime")
-        if timestamp:
-            metadata['timestamp'] = datetime.strptime(timestamp, "%Y:%m:%d %H:%M:%S").isoformat()
-        # Camera Model
-        if 'Model' in exif:
-            metadata['camera_model'] = exif['Model']
-    except Exception as e:
-        print(f"Could not extract metadata from {image_path}: {e}")
-    return metadata
+def save_checkpoint(processed_files, checkpoint_path):
+    with open(checkpoint_path, 'w') as f:
+        json.dump(list(processed_files), f, indent=4)
 
-def analyze_image(image_path, known_encodings, known_names, yolo_model, thresholds, output_folder):
-    print(f"Analyzing image: {image_path}")
-    image = cv2.imread(image_path)
-    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+def process_video(args):
+    (video_path, known_encodings, known_names, thresholds, yolo_model_path, output_folder, use_gpu) = args
 
     faces_found = []
     objects_found = []
-
-    face_locations = face_recognition.face_locations(rgb_image)
-    face_encodings = face_recognition.face_encodings(rgb_image, face_locations)
-
-    for face_encoding, face_location in zip(face_encodings, face_locations):
-        distances = face_recognition.face_distance(known_encodings, face_encoding)
-        best_match_index = distances.argmin() if len(distances) > 0 else -1
-        name = "Unknown"
-        distance = None
-        if best_match_index >= 0 and distances[best_match_index] < thresholds['face_match_threshold']:
-            name = known_names[best_match_index]
-            distance = float(distances[best_match_index])
-        faces_found.append({"name": name, "distance": distance})
-        top, right, bottom, left = face_location
-        cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 0), 2)
-        cv2.putText(image, name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-    results = yolo_model.predict(image, conf=thresholds['yolo_conf_threshold'])
     object_counter = Counter()
-    for r in results:
-        boxes = r.boxes.xyxy.cpu().numpy()
-        classes = r.boxes.cls.cpu().numpy()
-        confs = r.boxes.conf.cpu().numpy()
-        names = r.names
-        for box, cls, conf in zip(boxes, classes, confs):
-            x1, y1, x2, y2 = [int(i) for i in box]
-            label = names[int(cls)]
-            object_counter[label] += 1
-            objects_found.append({"label": label, "confidence": float(conf)})
-            cv2.rectangle(image, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            cv2.putText(image, f"{label} {conf:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
+    metadata = extract_metadata(video_path)
 
-    output_image_path = os.path.join(output_folder, os.path.basename(image_path))
-    cv2.imwrite(output_image_path, image)
+    try:
+        # Load YOLO model
+        yolo_model = YOLO(yolo_model_path)
+        if use_gpu:
+            yolo_model.to('cuda')  # Force GPU
 
-    metadata = extract_image_metadata(image_path)
+        cap = cv2.VideoCapture(video_path)
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        frames_to_process = min(thresholds.get('max_frames_per_video', 30), frame_count)
+        frame_interval = max(1, frame_count // frames_to_process)
+
+        processed_frames = 0
+        current_frame = 0
+
+        while processed_frames < frames_to_process and cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            if current_frame % frame_interval == 0:
+                # Face detection — placeholder (CPU unless you switch to a CUDA-compatible method)
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                face_locations = []
+                face_encodings = []
+
+                # Add your face recognition logic here (can switch to GPU with Dlib)
+
+                for encoding in face_encodings:
+                    matches = [np.linalg.norm(encoding - known) for known in known_encodings]
+                    if matches and min(matches) < thresholds['face_match_threshold']:
+                        matched_index = np.argmin(matches)
+                        matched_name = known_names[matched_index]
+                        faces_found.append(matched_name)
+                    else:
+                        faces_found.append("Unknown")
+
+                # YOLO object detection — now using GPU
+                results = yolo_model.predict(source=frame, conf=thresholds['yolo_conf_threshold'], verbose=False, device='cuda' if use_gpu else 'cpu')
+                for result in results:
+                    boxes = result.boxes
+                    for box in boxes:
+                        cls_id = int(box.cls[0])
+                        cls_name = yolo_model.model.names.get(cls_id, str(cls_id))
+                        object_counter[cls_name] += 1
+                        objects_found.append(cls_name)
+
+                processed_frames += 1
+
+            current_frame += 1
+
+        cap.release()
+
+    except Exception as e:
+        print(f"Error processing video {video_path}: {e}")
 
     return {
-        "file": os.path.basename(image_path),
+        "file": os.path.basename(video_path),
+        "full_path": video_path,
         "faces": faces_found,
         "objects": objects_found,
         "object_counts": dict(object_counter),
-        "metadata": metadata
+        "metadata": metadata,
+        "type": "video"
     }
-
-def analyze_video(video_path, known_encodings, known_names, yolo_model, thresholds, output_folder):
-    print(f"Analyzing video: {video_path}")
-    cap = cv2.VideoCapture(video_path)
-    video_results = {
-        "file": os.path.basename(video_path),
-        "faces": [],
-        "objects": [],
-        "object_counts": {},
-        "metadata": {}
-    }
-
-    frame_idx = 0
-    object_counter = Counter()
-    unique_faces = {}
-    while True:
-        ret, frame = cap.read()
-        if not ret or frame_idx >= thresholds['max_frames_per_video']:
-            break
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face_locations = face_recognition.face_locations(rgb_frame)
-        face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
-
-        for face_encoding, face_location in zip(face_encodings, face_locations):
-            distances = face_recognition.face_distance(known_encodings, face_encoding)
-            best_match_index = distances.argmin() if len(distances) > 0 else -1
-            name = "Unknown"
-            distance = None
-            if best_match_index >= 0 and distances[best_match_index] < thresholds['face_match_threshold']:
-                name = known_names[best_match_index]
-                distance = float(distances[best_match_index])
-            unique_faces[name] = distance
-            top, right, bottom, left = face_location
-            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-            cv2.putText(frame, name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-        results = yolo_model.predict(frame, conf=thresholds['yolo_conf_threshold'])
-        for r in results:
-            boxes = r.boxes.xyxy.cpu().numpy()
-            classes = r.boxes.cls.cpu().numpy()
-            confs = r.boxes.conf.cpu().numpy()
-            names = r.names
-            for box, cls, conf in zip(boxes, classes, confs):
-                x1, y1, x2, y2 = [int(i) for i in box]
-                label = names[int(cls)]
-                object_counter[label] += 1
-                video_results["objects"].append({"label": label, "confidence": float(conf)})
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-                cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
-
-        # Save keyframes
-        keyframe_name = os.path.splitext(os.path.basename(video_path))[0] + f"_frame{frame_idx}.jpg"
-        cv2.imwrite(os.path.join(output_folder, keyframe_name), frame)
-        frame_idx += 1
-
-    cap.release()
-
-    # Video metadata
-    video_results["faces"] = [{"name": k, "distance": v} for k, v in unique_faces.items()]
-    video_results["object_counts"] = dict(object_counter)
-    video_results["metadata"] = {
-        "frame_count": frame_idx,
-        "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-        "fps": cap.get(cv2.CAP_PROP_FPS),
-        "duration_sec": round(frame_idx / cap.get(cv2.CAP_PROP_FPS), 2) if cap.get(cv2.CAP_PROP_FPS) else None
-    }
-
-    return video_results
-
-def select_folder():
-    root = tk.Tk()
-    root.withdraw()  # Hide main window
-    folder_selected = filedialog.askdirectory(title="Select Folder to Analyze")
-    return folder_selected
-
-def save_checkpoint(processed_files, checkpoint_path):
-    try:
-        with open(checkpoint_path, "w") as f:
-            json.dump(list(processed_files), f)
-    except Exception as e:
-        print(f"Failed to save checkpoint: {e}")
-
-def load_checkpoint(checkpoint_path):
-    if os.path.exists(checkpoint_path):
-        try:
-            with open(checkpoint_path, "r") as f:
-                processed = json.load(f)
-                return set(processed)
-        except Exception as e:
-            print(f"Failed to load checkpoint: {e}")
-    return set()
-
-def process_file(file_path, known_encodings, known_names, yolo_model, thresholds, output_folder):
-    try:
-        print(f"Started processing: {file_path}")
-        if file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
-            result = analyze_image(file_path, known_encodings, known_names, yolo_model, thresholds, output_folder)
-        elif file_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv')):
-            result = analyze_video(file_path, known_encodings, known_names, yolo_model, thresholds, output_folder)
-        else:
-            print(f"Unsupported file type: {file_path}")
-            return None
-        print(f"Finished processing: {file_path}")
-        return result
-    except Exception as e:
-        print(f"Exception processing {file_path}:\n{traceback.format_exc()}")
-        return None
 
 def main():
+    # Load configuration
     config = load_config("config.yaml")
     known_people_folder = config.get('known_people_folder', 'known_people')
     output_folder = config.get('output_folder', 'output')
@@ -227,65 +106,91 @@ def main():
         'yolo_conf_threshold': config.get('yolo_conf_threshold', 0.5),
         'max_frames_per_video': config.get('max_frames_per_video', 30)
     }
+    max_workers = config.get('max_workers', cpu_count())
 
     os.makedirs(output_folder, exist_ok=True)
 
-    picked_folder = select_folder()
-    if not picked_folder:
-        print("No folder selected. Exiting.")
+    picked_folders = select_folders()
+    if not picked_folders:
+        print("No folders selected. Exiting.")
         return
+
+    print(f"Selected folders: {picked_folders}")
 
     known_encodings, known_names = load_known_people(known_people_folder)
     print(f"Loaded {len(known_encodings)} known faces.")
 
-    yolo_model = YOLO('yolov8n.pt')
+    yolo_model_path = 'yolov8n.pt'
 
     checkpoint_path = os.path.join(output_folder, "checkpoint.json")
     processed_files = load_checkpoint(checkpoint_path)
 
     all_files = []
-    for root_dir, _, files in os.walk(picked_folder):
-        for file in files:
-            all_files.append(os.path.join(root_dir, file))
+    video_extensions = ('.mp4', '.avi', '.mov', '.mkv')
+    image_extensions = ('.jpg', '.jpeg', '.png')
 
-    print(f"Total files found: {len(all_files)}")
+    for folder in picked_folders:
+        print(f'--> analyzing folder: {folder}')
+        for root, _, files in os.walk(folder):
+            for file in files:
+                if file.lower().endswith(image_extensions + video_extensions):
+                    all_files.append(os.path.join(root, file))
 
-    # Filter out already processed files
-    files_to_process = [f for f in all_files if os.path.basename(f) not in processed_files]
-
-    print(f"Files to process after checkpoint: {len(files_to_process)}")
-    for f in files_to_process:
-        print(f"  -> {f}")
+    image_files = [f for f in all_files if f.lower().endswith(image_extensions)]
+    video_files = [f for f in all_files if f.lower().endswith(video_extensions)]
 
     all_results = []
 
-    max_workers = 1  # Set to 1 for debugging; increase for more threads later
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [
-            executor.submit(process_file, path, known_encodings, known_names, yolo_model, thresholds, output_folder)
-            for path in files_to_process
+    with Manager() as manager:
+        processed_files_manager = manager.list(processed_files)
+
+        use_gpu = True  # or False, configurable via config.yaml
+
+        video_tasks = [
+            (vid, known_encodings, known_names, thresholds, yolo_model_path, output_folder, use_gpu)
+            for vid in video_files if os.path.basename(vid) not in processed_files
         ]
 
-        with tqdm(total=len(futures), desc="Processing files") as pbar:
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                except Exception as e:
-                    print(f"Exception in future: {e}")
-                    result = None
+        for vid in video_files:
+            if os.path.basename(vid) not in processed_files:
+                video_tasks.append((vid, known_encodings, known_names, thresholds, yolo_model_path, output_folder))
 
-                if result:
-                    all_results.append(result)
-                    processed_files.add(os.path.basename(result["file"]))
-                    save_checkpoint(processed_files, checkpoint_path)
+        # Prepare image tasks
+        image_tasks = []
+        for img in image_files:
+            if os.path.basename(img) not in processed_files:
+                image_tasks.append((img, known_encodings, known_names, thresholds, yolo_model_path, output_folder))
 
-                pbar.update(1)
+        with Pool(processes=max_workers) as pool:
+            # Images
+            image_results = []
+            if image_tasks:
+                print(f"Processing {len(image_tasks)} images...")
+                for result in tqdm(pool.imap_unordered(lambda args: process_file(*args), image_tasks), total=len(image_tasks), desc="Images"):
+                    if result:
+                        image_results.append(result)
+                        processed_files_manager.append(os.path.basename(result["file"]))
+
+            # Videos
+            video_results = []
+            if video_tasks:
+                print(f"Processing {len(video_tasks)} videos...")
+                for result in tqdm(pool.imap_unordered(process_video, video_tasks), total=len(video_tasks), desc="Videos"):
+                    if result:
+                        video_results.append(result)
+                        processed_files_manager.append(os.path.basename(result["file"]))
+
+        all_results.extend(image_results)
+        all_results.extend(video_results)
+
+        # Save checkpoint
+        save_checkpoint(processed_files_manager, checkpoint_path)
 
     results_json_path = os.path.join(output_folder, "results.json")
     with open(results_json_path, "w") as f:
         json.dump(all_results, f, indent=4)
 
-    print("Analysis complete. Results saved to", results_json_path)
+    print(f"Analysis complete. Results saved to {results_json_path}")
 
 if __name__ == "__main__":
     main()
