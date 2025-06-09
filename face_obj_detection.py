@@ -42,8 +42,7 @@ def process_video(args):
 
         cap = cv2.VideoCapture(video_path)
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        max_frames = thresholds.get('max_frames_per_video', 30)
-        frames_to_process = min(max_frames, frame_count)
+        frames_to_process = min(thresholds.get('max_frames_per_video', 30), frame_count)
         frame_interval = max(1, frame_count // frames_to_process)
 
         processed_frames = 0
@@ -55,12 +54,10 @@ def process_video(args):
                 break
 
             if current_frame % frame_interval == 0:
-                # Face recognition placeholder (implement GPU-accelerated face detection/recognition here)
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 face_locations = []
                 face_encodings = []
 
-                # TODO: Insert GPU-accelerated face encoding extraction here
                 for encoding in face_encodings:
                     matches = [np.linalg.norm(encoding - known) for known in known_encodings]
                     if matches and min(matches) < thresholds['face_match_threshold']:
@@ -70,9 +67,7 @@ def process_video(args):
                     else:
                         faces_found.append("Unknown")
 
-                # YOLO object detection
-                results = yolo_model.predict(source=frame, conf=thresholds['yolo_conf_threshold'], verbose=False,
-                                             device='cuda' if use_gpu else 'cpu')
+                results = yolo_model.predict(source=frame, conf=thresholds['yolo_conf_threshold'], verbose=False, device='cuda' if use_gpu else 'cpu')
                 for result in results:
                     boxes = result.boxes
                     for box in boxes:
@@ -105,27 +100,25 @@ def process_file_wrapper(args):
     return process_file(*args)
 
 
-def process_video_wrapper(args):
-    return process_video(*args)
-
-
 def main():
+    # Load configuration
+    config = load_config('config.yaml')
+    thresholds = config['thresholds']
+    yolo_model_path = config['yolo_model_path']
+    output_folder = config['output_folder']
+    use_gpu = config.get('use_gpu', False)
+    known_faces_folder = config.get('known_people_folder', 'known_faces')
 
-
-    config = load_config("config.yaml")
-    known_people_folder = config.get('known_people_folder', 'known_people')
-
-    multiprocessing.freeze_support()  # Important for Windows multiprocessing support
-
+    # Load known faces
     print("Loading known faces...")
-    known_faces = load_known_people(known_people_folder)
-    print(f"Loaded {len(known_faces)} known faces.")
+    known_encodings, known_names = load_known_people(known_faces_folder)
+    print(f"Loaded {len(known_encodings)} known faces.")
 
-    print("Please select folders or drives to analyze:")
+    # Select folders
     root_folders = select_folders()
     print(f"Selected folders: {root_folders}")
 
-    # Prepare image tasks
+    # Build image tasks
     image_tasks = []
     for folder in root_folders:
         print(f"--> analyzing folder: {folder}")
@@ -133,17 +126,26 @@ def main():
             for file in files:
                 if file.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff')):
                     full_path = os.path.join(root, file)
-                    image_tasks.append((full_path, known_faces))
+                    image_tasks.append((
+                        full_path,
+                        known_encodings,
+                        known_names,
+                        thresholds,
+                        yolo_model_path,
+                        output_folder,
+                        use_gpu
+                    ))
 
     print(f"Processing {len(image_tasks)} images...")
 
+    # Parallel processing
     with multiprocessing.Pool() as pool:
         for _ in tqdm(
             pool.imap_unordered(process_file_wrapper, image_tasks),
             total=len(image_tasks),
             desc="Images"
         ):
-            pass
+            pass  # Handle results here if needed
 
     print("Processing completed.")
 
