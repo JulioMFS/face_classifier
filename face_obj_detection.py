@@ -7,7 +7,8 @@ import numpy as np
 from tqdm import tqdm
 from collections import Counter
 from ultralytics import YOLO
-from utils import select_folders, load_known_people, process_file, extract_metadata  # assumed available
+from utils import select_folders, load_known_people, process_file, extract_metadata, \
+    select_folders_auto  # assumed available
 
 
 def load_config(config_path):
@@ -115,7 +116,8 @@ def main():
     print(f"Loaded {len(known_encodings)} known faces.")
 
     # Select folders
-    root_folders = select_folders()
+    root_folders = select_folders_auto()
+
     print(f"Selected folders: {root_folders}")
 
     # Build image tasks

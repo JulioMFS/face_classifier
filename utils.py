@@ -1,15 +1,21 @@
 import os
-import json
 import cv2
 import face_recognition
-
-import os
-import tkinter as tk
-from tkinter import filedialog, messagebox
-
-from PyQt5.QtWidgets import QApplication, QFileDialog, QListView, QTreeView, QAbstractItemView
 import sys
 from PyQt5.QtWidgets import QApplication, QFileDialog
+import platform
+
+def select_folders_cli():
+    folders = input("Enter folders to analyze, separated by commas: ")
+    return [f.strip() for f in folders.split(",") if f.strip()]
+
+def select_folders_auto():
+    if platform.system() == "Linux":
+        print("Detected Linux OS — using CLI folder selection.")
+        return select_folders_cli()
+    else:
+        # Use your existing GUI folder selector here
+        return select_folders()
 
 def select_folders():
     app = QApplication(sys.argv)
