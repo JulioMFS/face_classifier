@@ -118,7 +118,7 @@ def main():
     # Select folders
     root_folders = select_folders_auto()
 
-    print(f"Selected folders: {root_folders}")
+    print(f"-->Selected folders: {root_folders} <--")
 
     # Build image tasks
     image_tasks = []
@@ -126,8 +126,10 @@ def main():
         print(f"--> analyzing folder: {folder}")
         for root, dirs, files in os.walk(folder):
             for file in files:
+                #print(f'\t--> file: {file}')
                 if file.lower().endswith(('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff')):
                     full_path = os.path.join(root, file)
+                    #print(f'\t\t--> path: {full_path}')
                     image_tasks.append((
                         full_path,
                         known_encodings,
